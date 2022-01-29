@@ -1,0 +1,660 @@
+pipeline{
+    
+    agent none
+    
+    triggers{
+        GenericTrigger(
+            genericVariables: [
+                [key: 'changelist', value: '$.change']    
+            ],
+            token: 'ueproject' ,
+            
+            printContributedVariables: true,
+            printPostContent: true
+        )
+    }
+    
+    parameters{
+        choice(name: 'JobDescription', choices: 'Compile\nPackage\nPackAndUnpack\nExecuteAll')
+        choice(name: 'SolutionConfiguration', choices: 'Development_Editor\nDevelopment_Client\nDevelopment_Server\nShipping_Client\nShipping_Server\nDebugGame_Editor')
+        string(name: 'NumOfCL', defaultValue: 'latest', description: 'specify revisions of changelist as stored in the depot')
+        string(name: 'Cc', defaultValue: 'None', description: 'Courtesy copy field')
+        string(name: 'NumToKeep', defaultValue: '10', description: 'how many packages and logfiles to keep on server')
+    }
+
+    environment{
+        Time = "${BUILD_TIMESTAMP}"
+        CL = ""
+        p4s = ""
+        LogName = ""
+        SendTo = ""
+        isSrcChanged = ""
+        MapCheckLog = ""
+        StreamExistOnServer = ""
+        CurrentStream = ""
+        CurrentRoot = ""
+        CurrentFullRoot = ""
+        CurrentClient = ""
+        TriggeredBy = ""
+        changeLogMsg = ""
+        CompileUE = ""
+        describeOutput = ""
+        workspaceDIR = ""
+    }
+
+
+    stages{
+
+        stage('Init'){
+            agent{
+                label 'Windows_server'
+            }
+            steps{
+                script{
+                    workspaceDIR = ""
+                    bat "echo %cd% > CommandResult"
+                    workspaceDIR = readFile file: "./CommandResult", encoding: "UTF-8"
+                    workspaceDIR = workspaceDIR.trim()
+                    workspaceDIR = "${workspaceDIR}\\"
+                }
+                
+                echo 'Init..'
+                echo "This build begins at ${env.Time}"
+                echo "Build number is #${BUILD_NUMBER}"
+                echo "This build is doing \"${params.JobDescription}\" "
+                echo "The label of changelist is ${params.NumOfCL}"
+                script{
+                    dir('DevMain'){
+                        p4s = p4 credential: 'P4_credential', workspace: manualSpec(charset: 'utf8', cleanup: false, name: 'atg.devop_FruitDemo-DevMain_office_ATG-CICDServer', pinHost: false, spec: clientSpec(allwrite: false, backup: true, changeView: '', clobber: true, compress: false, line: 'LOCAL', locked: false, modtime: false, rmdir: false, serverID: '', streamName: '//FruitDemo/FruitDemo-DevMain', type: 'WRITABLE', view: ''))
+                        if(params.NumOfCL == 'latest'){
+                            def temp = p4s.run('changes', '-m1', '-s', 'submitted')
+                            for(def item : temp) {
+                                for (String key : item.keySet()) {
+                                    if(key == "change"){
+                                        CL = item.get(key)
+                                        break
+                                    }
+                                }
+                            }
+                        
+                        }
+                        else{
+                            CL = params.NumOfCL
+                        }
+                        echo "CL : ${CL}"
+                        LogName = "Win_${JOB_NAME}_${BUILD_NUMBER}"
+                        isSrcChanged = "false"
+                        StreamExistOnServer = "NotSure"
+                        CurrentStream = ""
+                        CurrentRoot = "DevMain"
+                        CurrentFullRoot = "D:\\Jen\\workspace\\FruitDemo\\DevMain\\"
+                        CompileUE = 'false'
+                    
+                        try{
+                            def temp = changelist
+                            JobDescription = "Compile"
+                            SolutionConfiguration = "Development_Editor"
+                            echo "this build is triggered by perforce"
+                            TriggeredBy = "perforce CL : ${CL}"
+                        }
+                        catch(Exception ex){
+                            TriggeredBy = "jenkins"
+                            echo "this program is built from jenkins "
+                        }
+                    
+                    
+                        List<String> CL_Root = new ArrayList<String>();
+                        List<String> CL_client = new ArrayList<String>();
+                        List<String> CL_Stream = new ArrayList<String>();
+                        def wks = p4s.run('workspaces')
+                        for(def item : wks){
+                            if(item.get("Owner") == "atg.devop"){
+                                
+                                CL_Root.add(item.get("Root"))
+                                CL_client.add(item.get("client"))
+                                CL_Stream.add(item.get("Stream"))
+                            }
+                        }
+                    
+                        describeOutput = ""
+                        bat """
+                            p4 -F %%depotFile0%% -ztag describe -s ${CL} > CommandResult
+                        """
+                        describeOutput = readFile file: "./CommandResult", encoding: "UTF-8"
+
+                    
+                        def tempres = ""
+                    
+                        def reg = ~/${describeOutput}/
+                    
+                    
+                        for(int i = 0; i < CL_Stream.size(); i++){
+                            def regRes = reg=~CL_Stream[i]
+                                
+                            try{
+                                tempres = regRes[0][0]
+                                CurrentStream = CL_Stream[i]
+                                CurrentFullRoot = CL_Root[i]
+                                CurrentClient = CL_client[i]
+                                echo "Current workspace is ${CurrentClient}"
+                                echo "Current stream is ${CurrentStream}"
+                                echo "Current Root is ${CurrentFullRoot}"
+                            
+                            }
+                            catch(Exception ex){
+                                
+                            }
+                        }
+                    }
+                    def streaminfo = ""
+                    streaminfo = p4s.run('streams')
+                    
+                    if(CurrentStream == ""){
+                        StreamExistOnServer ='false'
+                        echo "No such stream exist on server. Creating workspace on server specific to your stream..."
+                        for(def item : streaminfo){
+                            
+                            
+                            def RegResult = RegMatch(describeOutput, item.get('Name'))
+                            if(RegResult == "true"){
+                                CurrentRoot = item.get('Name')
+                                CurrentStream = item.get('Stream')
+                                CurrentClient = "atg.devop_${CurrentRoot}_office_ATG_CICDServer"
+                                
+                                
+                                bat "mkdir ${CurrentRoot}"
+                                CurrentFullRoot = "${workspaceDIR}${CurrentRoot}"
+                                
+                                dir("${CurrentRoot}"){
+                                    
+                                    
+                                    bat """
+                                        p4 client -S ${CurrentStream} -o ${CurrentClient} | p4 client -i
+                                    """
+                                    
+                                    p4s = p4 credential: 'P4_credential', workspace: manualSpec(charset: 'utf8', cleanup: false, name: "${CurrentClient}", pinHost: false, spec: clientSpec(allwrite: false, backup: true, changeView: '', clobber: true, compress: false, line: 'LOCAL', locked: false, modtime: false, rmdir: false, serverID: '', streamName: "${CurrentStream}", type: 'WRITABLE', view: ''))
+                                
+                                    StreamExistOnServer = 'true'
+                                    CompileUE = 'true'
+                                    
+                                }
+                            }
+                        }
+                        
+                    }
+                    else{
+                        dir("${CurrentFullRoot}"){
+                        StreamExistOnServer ='true'
+                        CurrentRoot = CurrentFullRoot.replace("${workspaceDIR}", "")
+                        p4s = p4 credential: 'P4_credential', workspace: manualSpec(charset: 'utf8', cleanup: false, name: "${CurrentClient}", pinHost: false, spec: clientSpec(allwrite: false, backup: true, changeView: '', clobber: true, compress: false, line: 'LOCAL', locked: false, modtime: false, rmdir: false, serverID: '', streamName: "${CurrentStream}", type: 'WRITABLE', view: ''))
+                            
+                        }
+                    }
+                    
+                }
+                
+                
+                echo "-----------------------------------------------------------------"
+            }
+
+        }
+        
+        stage('checkout'){
+            
+            agent{
+                label 'Windows_server'
+            }
+            
+            when{
+                expression{return StreamExistOnServer != "false"}
+            }
+            
+            steps{
+                script{
+                    echo 'Checkout begins..'
+                    
+                    
+                    timeout(unit: 'HOURS', time: 1){
+                        
+                        bat """
+                            p4 set p4client=${CurrentClient}
+                            p4 set P4_10.0.201.13:1666_CHARSET=utf8
+                            p4 sync -q ${CurrentStream}/... @${CL}
+                        """
+                    }
+                    
+                    echo 'The changelist your workspace has been synced to:'
+                    
+                    def _userName = ""
+                    
+                    dir("${CurrentRoot}"){
+                        bat """
+                            p4 -F %%user%% -ztag describe -s ${CL} > CommandResult
+                        """
+                        _userName = readFile file: "./CommandResult", encoding: "UTF-8"
+                    }
+                    
+                    _userName = _userName.trim()
+                
+                    def UserInfo = p4s.run('users')
+                    
+                    for(def item : UserInfo){
+                        def name = item.get("User")
+                        
+                        if(_userName == name){
+                            SendTo = item.get("Email")
+                        }
+                    }
+                    
+                    
+                    echo "#${CL} by ${_userName}"
+                    
+                    
+                    echo 'succeed to checkout!'
+                }
+                
+                echo '---------------------------------------------------------------------'
+                
+            }
+            
+        }
+
+        stage('ChangeLogInfo'){
+            
+            agent{
+                label 'Windows_server'
+            }
+
+            when{
+                expression{return (params.JobDescription != 'Package') && (params.JobDescription != 'PackAndUnpack') && (StreamExistOnServer != 'false')}
+            }
+
+            steps{
+                
+                echo "ChangeLogInfo:"
+                
+                script{
+                    dir("${CurrentRoot}"){
+                        bat "p4 describe -S ${CL} > CommandResult"
+                        changeLogMsg = readFile file: "./CommandResult", encoding: "UTF-8"
+                        echo "${changeLogMsg}"
+                    }
+                    def temp = p4s.run('describe','-S',"${CL}")
+                    for(def item : temp){
+                        for(String key : item.keySet()){
+                            if(key == 'depotFile0'){
+                                def AffectedFiles = item.get(key)
+                                
+                                def reg1 = ~/\.+cpp/
+                                def reg2 = ~/\.+h/
+                                def regRes1 = AffectedFiles=~reg1
+                                def regRes2 = AffectedFiles=~reg2
+        
+                                if(regRes1.size() == 0 && regRes2.size() == 0){
+                                    isSrcChanged = "false"
+                                    echo "No source code affected!"
+                                }
+                                else{
+                                    isSrcChanged = "true"
+                                    echo "Source code affected!"
+                                }
+
+                            }    
+                        }
+                    }
+                    
+                }
+                
+                echo "-------------------------------------------------------------------------------"
+                
+            }
+
+        }
+
+        stage('build'){
+            agent{
+                label 'Windows_server'
+            }
+            when{
+                expression{return params.JobDescription != 'Package' && params.JobDescription != 'PackAndUnpack' && StreamExistOnServer != "false"}
+            } 
+            steps{
+                echo 'Build on windows'
+                script{
+                    dir("${CurrentRoot}"){
+                        timeout(unit: 'HOURS', time: 2){
+                            if(CompileUE == 'true'){
+                                bat "call GenerateProjectFiles.bat"
+                                bat "BuildEditor.bat"
+                            }
+                        }
+                        
+                        timeout(unit: 'HOURS', time: 2){
+                            if(SolutionConfiguration == 'Development_Editor')
+                                bat """
+                                    Engine\\Build\\BatchFiles\\Build.bat -Target="FruitDemoEditor Win64 Development" -Target="ShaderCompileWorker Win64 Development -Quiet" -WaitMutex -FromMsBuild -NoFASTBuild
+                                """
+                            else if(SolutionConfiguration == 'Development_Client')
+                                bat """
+                                    Engine\\Build\\BatchFiles\\Build.bat UnrealClient Win64 Development -WaitMutex -FromMsBuild
+                                """
+                            else if(SolutionConfiguration == 'Development_Server')
+                                bat """
+                                    Engine\\Build\\BatchFiles\\Build.bat UnrealServer Win64 Development -WaitMutex -FromMsBuild
+                                """
+                            else if(SolutionConfiguration == 'Shipping_Client')
+                                bat """
+                                    Engine\\Build\\BatchFiles\\Build.bat UnrealClient Win64 Shipping -WaitMutex -FromMsBuild
+                                """
+                            else if(SolutionConfiguration == 'Shipping_Server')
+                                bat """
+                                    Engine\\Build\\BatchFiles\\Build.bat UnrealServer Win64 Shipping -WaitMutex -FromMsBuild
+                                """
+                            else if(SolutionConfiguration == 'DebugGame_Editor')
+                                bat """
+                                    Engine\\Build\\BatchFiles\\Build.bat -Target="UnrealEditor Win64 DebugGame" -Target="ShaderCompileWorker Win64 Development -Quiet" -WaitMutex -FromMsBuild
+                                """
+                        }
+                    }
+                }
+                echo "successfully build!"
+                echo "-----------------------------------------------------------------------------------"
+                
+            }
+
+
+        }
+
+
+
+        stage('Map Check'){
+            agent{
+                label 'Windows_server'
+            }
+            when{
+                expression{return params.JobDescription != 'Package' && params.JobDescription != 'PackAndUnpack' && StreamExistOnServer != "false"}
+            } 
+            steps{
+                echo "map check begins"
+                script{
+                    
+                    try{
+                    dir("${CurrentRoot}"){
+                    bat """
+                        Engine\\Binaries\\Win64\\UnrealEditor.exe "FruitDemo\\FruitDemo.uproject" -run=MapCheckCommandlet -AllowCommandletRendering ^
+                        -map1="/Game/FruitDemo/Maps/Productions/FirstPlayable.umap" ^
+                        -map2="/Game/FruitDemo/Maps/Gyms/VehicleTest/VehicleAdvExampleMap.umap" ^
+                        -map3="/Game/FruitDemo/Maps/Gyms/MetricsTestMap/AnimationTestMap.umap" ^
+                        -map4="/Game/FruitDemo/Maps/Gyms/MetricsTestMap/MetricsTestMap.umap" ^
+                        -map5="/Game/FruitDemo/Maps/Gyms/FoliageTest/Foliage.umap" ^
+                        -map6="/Game/FruitDemo/Maps/Gyms/FoliageTest/Mobile.umap" ^
+                        -map7="/Game/FruitDemo/Maps/Tests/FoliageScatterTest_4Kx4K.umap" ^
+                        > nul
+                    """
+                    }
+                    }
+                    catch(Exception ex){
+                        echo "some errors happen during map check!"
+                    }
+                    
+                    
+                    
+                }
+                echo "map check success!"
+                echo "---------------------------------------------------------------------------------"
+            }
+            
+        }
+
+
+
+
+        stage('Package'){
+
+            agent{
+                label 'Windows_server'
+            }
+            when{
+                expression{return (params.JobDescription == 'Package' || params.JobDescription == 'PackAndUnpack' || params.JobDescription == 'ExecuteAll' || isSrcChanged != "false") && StreamExistOnServer != "false"}
+            }
+            steps{
+                echo 'pack begins'
+                script{
+                    LogName = "Win_${JOB_NAME}_${BUILD_NUMBER}"
+                }
+                script{
+                    dir("${CurrentRoot}"){
+                        timeout(unit: 'HOURS', time: 2){
+                            bat """
+                                7z a -tzip PackAndUnpackFile/${LogName}.zip ^
+                                Engine/Binaries/ ^
+                                FruitDemo/Binaries/
+                            """
+                        }
+                    }
+                }
+                echo "Pack succeed!"
+                echo '-------------------------------------------------------------------------------------------'
+            }
+
+        }
+
+        stage('Unpack'){
+            agent{
+                label 'Windows_server'
+            }
+            when{
+                expression{ return (params.JobDescription == 'PackAndUnpack' || params.JobDescription == 'ExecuteAll') && StreamExistOnServer != "false"}
+            }
+            steps{
+                echo "unpack begins"
+                dir("${CurrentRoot}/PackAndUnpackFile"){
+                    bat "mkdir ${LogName}"
+                
+                    bat """
+                        7z x -tzip ${LogName}.zip -o${LogName}/
+                    """
+                }
+                echo "succeed to unpack"
+                echo '--------------------------------------------------------------------------------'
+            }
+
+        }
+
+
+        stage('Clean'){
+            agent{
+                label 'Windows_server'
+            }
+            when{
+                expression{ return (params.JobDescription == 'PackAndUnpack' || params.JobDescription == 'Package' || params.JobDescription == 'ExecuteAll') && StreamExistOnServer != "false"}
+            }
+            steps{
+                script{
+                    echo 'Cleaning begins'
+                    echo "keep ${params.NumToKeep} packages and logfiles on server"
+                    dir("${CurrentRoot}/PackAndUnpackFile"){
+                        echo 'cleaning old package files'
+                        def pendingFiles = findFiles(glob: "**.zip")
+                        SortByTime(pendingFiles)
+                        DeleteFiles(pendingFiles, "${params.NumToKeep}")
+                    }
+                    dir("${CurrentRoot}/LogFile"){
+                        echo 'cleaning old log files'
+                        def pendinglogFiles = findFiles(glob: "**.txt")
+                        SortByTime(pendinglogFiles)
+                        DeleteFiles(pendinglogFiles, "${params.NumToKeep}")
+                    }
+                    echo 'cleaning succeed!'
+                    echo '----------------------------------------------------------------------------------------'
+                }
+            }
+        }
+        
+        
+    }
+
+    post{
+        always{
+            
+            node('Windows_server'){
+                dir("${CurrentRoot}/LogFile"){
+                    script{
+                        def logUrl = env.BUILD_URL + 'consoleText'
+                        def response = httpRequest(url: logUrl, authentication: 'jenkins_admin', ignoreSslErrors: true)
+                        def log = response.content
+                        
+                        writeFile file: "./LogInfo_${LogName}.txt", text: log, encoding: "UTF-8"
+                    }
+                }
+                script{
+                    dir("${CurrentRoot}"){
+                        bat """
+                            type FruitDemo\\Saved\\Logs\\FruitDemo.log | findstr "MapCheck" > CommandResult
+                        """
+                        MapCheckLog = readFile file: "./CommandResult", encoding: "UTF-8"
+                    }
+                }
+            }
+            
+            
+            node('Mac_server'){
+                dir('LogFile'){
+                    script{
+                        def logUrl = env.BUILD_URL + 'consoleText'
+                        def response = httpRequest(url: logUrl, authentication: 'jenkins_admin', ignoreSslErrors: true)
+                        def log = response.content
+                        def temp1 = "---------------------------------------\n"
+                        def temp2 = "Map Check result: \n"
+                        log = log + temp1
+                        log = log + temp2
+                        log = log + MapCheckLog
+                        writeFile file: "./LogInfo_${LogName}.txt", text: log, encoding: "UTF-8"
+                        sh """
+                            sed -i '' '/\\[Pipeline\\]/d' ./LogInfo_${LogName}.txt
+                        """
+
+                    }
+                script{
+                if(StreamExistOnServer != "false"){
+                    def color = ""
+                    echo "${currentBuild.currentResult}"
+                    if(currentBuild.currentResult == "SUCCESS"){
+                        color = "3BD23D"
+                    }
+                    else{
+                        color = "FF0000"
+                    }
+                    def text = """
+                    <!DOCTYPE html>
+                <html>
+                <head>
+                <meta charset="UTF-8">
+                <title>${env.JOB_NAME}-第${BUILD_NUMBER}次构建日志</title>
+                </head>
+ 
+ 
+                <body leftmargin="8" marginwidth="0" topmargin="8" marginheight="4" offset="0">
+                    <table width="95%" cellpadding="0" cellspacing="10" style="font-size: 11pt; font-family: Consolas, Microsoft Yahei, Tahoma, Arial, Helvetica, sans-serif;letter-spacing: 1.25px;">
+                        <tr>
+                            <td>(本邮件由程序自动下发，请勿回复！)</td>
+                        </tr>
+                        <tr>
+                            <td>
+                                <h2><font color="#${color}" size = 5pt>构建结果 - ${currentBuild.currentResult}</font></h2>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><br />
+                                <b><font color="#0B610B" size = 4pt>构建信息</font></b>
+                                <hr size="2" width="100%" align="center" />
+                            </td>
+                        </tr>
+                        <tr>
+                            <td>
+                                <ul>
+                                    <li style="line-height: 30px">项目名称:&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ${currentBuild.fullProjectName}</li>
+                                    <li style="line-height: 30px">Stream： &emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&nbsp;&emsp;&emsp;&emsp;&emsp;${CurrentStream}</li>
+                                    <li style="line-height: 30px">CL编号:&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&ensp;&thinsp;${CL}</li>
+                                    <li style="line-height: 30px">构建编号:&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;${BUILD_NUMBER}</li>
+                                    <li style="line-height: 30px">触发原因：&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;triggered by ${TriggeredBy}</li>
+                                    <li style="line-height: 30px">构建触发时间: &nbsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp; &nbsp;&nbsp;${Time}</li>
+                                    <li style="line-height: 30px">任务描述：&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;${params.JobDescription}</li>
+                                    <li style="line-height: 30px">收件人：&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;${SendTo}</li>
+                                    <li style="line-height: 30px">Jenkins日志：&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&nbsp;&nbsp;&nbsp;&nbsp;<a href="${BUILD_URL}console">${BUILD_URL}console</a></li>
+                                    <li style="line-height: 30px">Jenkins账号：&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&nbsp;&nbsp;&nbsp;&nbsp;GivenName-LastName, 密码: 123456</li>
+                                    <li style="line-height: 30px">详细的log信息见附件</li>
+                                </ul>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td>
+                                <b><font color="#0B610B" size = 4pt>变更信息:</font></b>
+                               <hr size="2" width="100%" align="center" />
+                            </td>
+                        </tr>
+                        
+                        <tr>
+                            <td>
+                                <ul>
+                                    <li style="line-height: 30px">变更集: <p style="white-space: pre-line;">${changeLogMsg}</p></a></li>
+                                </ul>   
+                            </td>
+                        </tr>
+                        
+ 
+                    </table>
+ 
+ 
+                </body>
+                </html>
+                """
+                emailext body:"${text}", subject: "${currentBuild.fullProjectName} - CL # ${CL} - ${currentBuild.currentResult}!", to: "atg.devop@yingxiong.com", attachmentsPattern: "LogInfo_${LogName}.txt"
+                
+                echo "mail to ${SendTo} !"
+                }
+                }
+                echo '--------------------------------------------------------------'
+
+                }
+            }
+
+        }
+
+    }
+
+}
+
+def SortByTime(def PendingFiles){
+    for(def i = 0; i < PendingFiles.size(); i++){
+        for(def j = 0; j < PendingFiles.size(); j++){
+            if(i == j) continue;
+            if(PendingFiles[i].lastModified > PendingFiles[j].lastModified){
+                def temp = PendingFiles[i]
+                PendingFiles[i] = PendingFiles[j]
+                PendingFiles[j] = temp
+            }
+        }
+    }
+    return PendingFiles
+}
+
+def DeleteFiles(def PendingFiles, def NumToKeep){
+    def n = 0
+    for(file in PendingFiles){
+        if(n >= NumToKeep.toInteger()){
+            echo "delete ${file}"
+            bat "del ${file}"
+        }
+        n++;
+    }
+}
+
+@NonCPS
+def RegMatch(def Str, def StrReg){
+    def reg = ~/${StrReg}/
+    def regRes = Str=~reg
+    if(regRes.size()!=0 ) return "true"
+    else return "false"
+}
+
